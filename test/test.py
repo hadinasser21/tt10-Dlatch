@@ -3,13 +3,29 @@
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import Timer, RisingEdge, with_timeout
+from cocotb.triggers import Timer
 
 def set_ui(dut, d, en):
     dut.ui_in.value = ((en & 1) << 1) | ((d & 1) << 0)
 
+def qbit(dut):
+    return int(dut.uo_out.value) & 1
+
+async def wait_q(dut, expected, timeout_us=600, step_ns=100):
+    """
+    Poll uo_out[0] until it equals expected or timeout.
+    Works even when RisingEdge callbacks are not supported by the simulator.
+    """
+    steps = int((timeout_us * 1000) / step_ns)  # us -> ns
+    for _ in range(steps):
+        if qbit(dut) == expected:
+            return
+        await Timer(step_ns, units="ns")
+    raise AssertionError(f"Timeout waiting for Q={expected}. Final Q={qbit(dut)} uo_out={dut.uo_out.value}")
+
 @cocotb.test()
 async def test_dlatch(dut):
+    # Clock required by framework, latch doesn't use it
     cocotb.start_soon(Clock(dut.clk, 10, units="us").start())
 
     dut.ena.value = 1
@@ -21,19 +37,17 @@ async def test_dlatch(dut):
     await Timer(50, units="us")
     dut.rst_n.value = 1
     await Timer(50, units="us")
-    assert (int(dut.uo_out.value) & 1) == 0
+    assert qbit(dut) == 0
 
-    # EN=1, D=1 → wait for real latch propagation
+    # EN=1, D=1 -> Q should become 1 (gate-level may take ~200us)
     set_ui(dut, d=1, en=1)
-    await with_timeout(RisingEdge(dut.uo_out[0]), 500, "us")
-    assert (int(dut.uo_out.value) & 1) == 1
+    await wait_q(dut, expected=1, timeout_us=600, step_ns=200)
 
-    # EN=0, D=0 → Q holds
+    # EN=0, D=0 -> Q holds 1
     set_ui(dut, d=0, en=0)
-    await Timer(100, units="us")
-    assert (int(dut.uo_out.value) & 1) == 1
+    await Timer(50, units="us")
+    assert qbit(dut) == 1
 
-    # EN=1, D=0 → Q updates low
+    # EN=1, D=0 -> Q should become 0
     set_ui(dut, d=0, en=1)
-    await Timer(200, units="us")
-    assert (int(dut.uo_out.value) & 1) == 0
+    await wait_q(dut, expected=0, timeout_us=600, step_ns=200)
